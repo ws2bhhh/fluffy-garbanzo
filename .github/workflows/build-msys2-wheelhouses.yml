@@ -69,8 +69,6 @@ jobs:
                       ${{ matrix.prefix }}-gcc
                       ${{ matrix.prefix }}-cmake
                       ${{ matrix.prefix }}-rust
-                      # ${{ matrix.prefix }}-hyperscan
-                      # ${{ matrix.prefix }}-ragel
                       ${{ matrix.prefix }}-pkgconf
                       ${{ matrix.prefix }}-make
                   path-type: inherit
