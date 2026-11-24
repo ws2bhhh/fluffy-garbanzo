@@ -1,0 +1,148 @@
+name: Build MSYS2 Wheelhouses (MINGW64 + UCRT64, Continue-on-Error)
+
+on:
+    workflow_dispatch:
+    push:
+        branches: [main]
+
+permissions:
+    contents: read
+
+concurrency:
+    group: msys2-wheelhouse-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    discover:
+        runs-on: ubuntu-latest
+        outputs:
+            matrix: ${{ steps.set-matrix.outputs.matrix }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Build matrix from msys2-wheel-packages.json
+              id: set-matrix
+              run: |
+                  if [ -f msys2-wheel-packages.json ]; then
+                    MATRIX=$(jq -c '
+                      [ .[] as $p
+                        | ("MINGW64|mingw-w64-x86_64|msys2-mingw64",
+                           "UCRT64|mingw-w64-ucrt-x86_64|msys2-ucrt64")
+                        | split("|") as [$ms, $pfx, $tag]
+                        | {package: $p, msystem: $ms, prefix: $pfx, tag: $tag}
+                      ]' msys2-wheel-packages.json)
+                  else
+                    echo "::warning::msys2-wheel-packages.json not found, using empty matrix"
+                    MATRIX='[]'
+                  fi
+                  echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+                  echo "matrix=$MATRIX"
+
+    build:
+        needs: discover
+        if: needs.discover.outputs.matrix != '[]' && needs.discover.outputs.matrix != ''
+        runs-on: windows-latest
+        defaults:
+            run:
+                shell: msys2 {0}
+
+        strategy:
+            fail-fast: false
+            max-parallel: 4
+            matrix:
+                include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+
+        steps:
+            - name: Checkout source
+              uses: actions/checkout@v4
+
+            - name: Setup MSYS2 (${{ matrix.msystem }})
+              uses: msys2/setup-msys2@v2
+              with:
+                  msystem: ${{ matrix.msystem }}
+                  update: true
+                  install: >-
+                      ${{ matrix.prefix }}-python
+                      ${{ matrix.prefix }}-python-pip
+                      ${{ matrix.prefix }}-python-setuptools
+                      ${{ matrix.prefix }}-python-wheel
+                      ${{ matrix.prefix }}-gcc
+                      ${{ matrix.prefix }}-cmake
+                      ${{ matrix.prefix }}-rust
+                      ${{ matrix.prefix }}-hyperscan
+                      ${{ matrix.prefix }}-ragel
+                      ${{ matrix.prefix }}-pkgconf
+                      ${{ matrix.prefix }}-make
+                  path-type: inherit
+
+            - name: Build wheels for ${{ matrix.package }} (${{ matrix.msystem }})
+              env:
+                  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+              run: |
+                  set -euo pipefail
+                  export PKG_CONFIG_PATH="$MINGW_PREFIX/lib/pkgconfig"
+                  export CMAKE_PREFIX_PATH="$MINGW_PREFIX"
+                  export LIBRARY_PATH="$MINGW_PREFIX/lib"
+                  export CPATH="$MINGW_PREFIX/include"
+                  out="wheelhouse/${GITHUB_RUN_ID}/${{ matrix.msystem }}/${{ matrix.package }}"
+                  mkdir -p "$out"
+                  python -m pip wheel "${{ matrix.package }}" \
+                      --wheel-dir "$out" \
+                      --no-build-isolation
+                  echo "===== wheels produced for ${{ matrix.package }} (${{ matrix.msystem }}) ====="
+                  ls -lh "$out"
+
+            - name: Upload wheel artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: wheelhouse-${{ matrix.msystem }}-${{ matrix.package }}
+                  path: wheelhouse/${{ github.run_id }}/${{ matrix.msystem }}/${{ matrix.package }}/*.whl
+                  if-no-files-found: warn
+
+    publish:
+        needs: [discover, build]
+        if: always() && needs.build.result != 'skipped' && needs.build.result != 'cancelled'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            actions: read
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - msystem: MINGW64
+                      tag: msys2-mingw64
+                    - msystem: UCRT64
+                      tag: msys2-ucrt64
+
+        steps:
+            - name: Download this environment's artifacts
+              uses: actions/download-artifact@v4
+              continue-on-error: true
+              with:
+                  pattern: wheelhouse-${{ matrix.msystem }}-*
+                  path: dl
+
+            - name: Collect and dedupe wheels
+              id: collect
+              run: |
+                  mkdir -p dist
+                  if [ -d dl ]; then
+                    find dl -type f -name '*.whl' -exec cp -n {} dist/ \;
+                  fi
+                  count=$(ls -1 dist/*.whl 2>/dev/null | wc -l)
+                  echo "count=$count" >> "$GITHUB_OUTPUT"
+                  echo "collected $count wheels for ${{ matrix.msystem }}"
+
+            - name: Publish wheels to Release (${{ matrix.tag }})
+              if: steps.collect.outputs.count != '0'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  TAG="${{ matrix.tag }}"
+                  gh release view "$TAG" >/dev/null 2>&1 || \
+                    gh release create "$TAG" \
+                      --title "$TAG" \
+                      --notes "MSYS2 ${{ matrix.msystem }} Python wheels (auto-updated on every run)."
+                  gh release upload "$TAG" dist/*.whl --clobber
