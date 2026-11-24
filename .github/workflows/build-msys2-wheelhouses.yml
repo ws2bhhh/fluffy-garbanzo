@@ -2,8 +2,8 @@ name: Build MSYS2 Wheelhouses (MINGW64 + UCRT64, Continue-on-Error)
 
 on:
     workflow_dispatch:
-    push:
-        branches: [main]
+    # push:
+    #     branches: [main]
 
 permissions:
     contents: read
@@ -69,8 +69,8 @@ jobs:
                       ${{ matrix.prefix }}-gcc
                       ${{ matrix.prefix }}-cmake
                       ${{ matrix.prefix }}-rust
-                      ${{ matrix.prefix }}-hyperscan
-                      ${{ matrix.prefix }}-ragel
+                      # ${{ matrix.prefix }}-hyperscan
+                      # ${{ matrix.prefix }}-ragel
                       ${{ matrix.prefix }}-pkgconf
                       ${{ matrix.prefix }}-make
                   path-type: inherit
